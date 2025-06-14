@@ -2,35 +2,47 @@
 import socket
 import sys
 import os
-import time # Import time for potential sleep in future exponential backoff
+import time
 
-def send_and_receive(sock, message, server_address, timeout_ms=1000): # --- Step 8: Add timeout_ms parameter
+# --- Start of Step 9 additions/changes ---
+def send_and_receive(sock, message, server_address, initial_timeout_ms=1000, max_retries=5):
     """
-    发送消息并等待响应 (带超时)。
+    可靠地发送消息并等待响应。
+    如果超时，则重传并指数级增加超时时间。
     Args:
         sock (socket.socket): 用于发送和接收的UDP套接字。
         message (str): 要发送的ASCII消息。
         server_address (tuple): (server_host, server_port) 服务器地址。
-        timeout_ms (int): 超时时间（毫秒）。
+        initial_timeout_ms (int): 初始超时时间（毫秒）。
+        max_retries (int): 最大重试次数。
     Returns:
         tuple: (response_message_str, sender_address_tuple) 如果成功，否则 (None, None)。
     """
     encoded_message = message.encode('ascii')
-    try:
-        sock.settimeout(timeout_ms / 1000.0) # --- Step 8: Set socket timeout (in seconds)
-        print(f"[send_and_receive] Sending '{message}' to {server_address} (Timeout: {timeout_ms}ms)")
-        sock.sendto(encoded_message, server_address)
-        
-        response_data, sender_addr = sock.recvfrom(8192)
-        response_message = response_data.decode('ascii').strip()
-        print(f"[send_and_receive] Received response: '{response_message}' from {sender_addr}")
-        return response_message, sender_addr
-    except socket.timeout: # --- Step 8: Handle timeout exception
-        print(f"[send_and_receive] Timeout. No response from {server_address}.")
-        return None, None
-    except Exception as e:
-        print(f"[send_and_receive] Error during send/receive: {e}")
-        return None, None
+    current_timeout = initial_timeout_ms # Current timeout starts with initial
+    
+    for i in range(max_retries):
+        try:
+            sock.settimeout(current_timeout / 1000.0) # Convert ms to seconds
+            print(f"[send_and_receive] Sending '{message}' to {server_address} (Timeout: {current_timeout}ms, Attempt: {i+1}/{max_retries})")
+            sock.sendto(encoded_message, server_address)
+            
+            response_data, sender_addr = sock.recvfrom(8192)
+            response_message = response_data.decode('ascii').strip()
+            print(f"[send_and_receive] Received response: '{response_message}' from {sender_addr}")
+            return response_message, sender_addr
+        except socket.timeout:
+            print(f"[send_and_receive] Timeout. No response from {server_address}. Retrying...")
+            current_timeout *= 2 # Exponential backoff: double the timeout
+            # Optional: Add a small sleep here, but for UDP retransmissions, it's often not necessary.
+            # time.sleep(0.1) 
+        except Exception as e:
+            print(f"[send_and_receive] An unexpected error occurred: {e}. Aborting send/receive.")
+            return None, None
+    
+    print(f"[send_and_receive] Max retries ({max_retries}) reached. Failed to get response for '{message}'.")
+    return None, None
+# --- End of Step 9 additions/changes ---
 
 def start_client(server_host, server_port, files_list_path):
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -49,13 +61,14 @@ def start_client(server_host, server_port, files_list_path):
 
     download_message = f"DOWNLOAD {filename_to_request}"
     
-    # --- Start of Step 8 change ---
-    # Pass an initial timeout value (e.g., 1000 ms)
-    response, sender = send_and_receive(client_socket, download_message, (server_host, server_port), timeout_ms=1000)
-    # --- End of Step 8 change ---
+    # --- Start of Step 9 change ---
+    # Call send_and_receive with initial_timeout_ms and max_retries
+    response, sender = send_and_receive(client_socket, download_message, (server_host, server_port), 
+                                        initial_timeout_ms=1000, max_retries=5)
+    # --- End of Step 9 change ---
 
     if not response:
-        print("No response received from server (possibly due to timeout). Exiting.")
+        print("Failed to get response from server after retries. Exiting.")
         return
 
     parts = response.split(" ")
