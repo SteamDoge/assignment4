@@ -5,7 +5,7 @@ import os
 import threading
 import random
 import time
-import base64 # Import base64 module
+import base64
 
 def handle_file_transmission(filename, client_address):
     file_path = os.path.join("files", filename)
@@ -34,15 +34,13 @@ def handle_file_transmission(filename, client_address):
         print(f"[Thread for {filename} from {client_address}] Sending initial OK: {ok_response}")
         data_socket.sendto(ok_response.encode('ascii'), client_address)
 
-        # --- Start of Step 13 additions ---
-        # Enter loop to receive FILE GET requests
-        with open(file_path, 'rb') as f: # Open file once for reading in the thread
+        with open(file_path, 'rb') as f:
             while True:
-                data_socket.settimeout(30) # Set a timeout for receiving requests (e.g., 30 seconds)
+                data_socket.settimeout(30)
                 try:
                     request_data, addr = data_socket.recvfrom(4096)
                     request_message = request_data.decode('ascii').strip()
-                    print(f"[Thread for {filename} from {client_address}] Received request: {request_message}")
+                    # print(f"[Thread for {filename} from {client_address}] Received request: {request_message}")
 
                     parts = request_message.split(" ")
                     if len(parts) >= 3 and parts[0] == "FILE" and parts[1] == filename and parts[2] == "GET":
@@ -51,20 +49,22 @@ def handle_file_transmission(filename, client_address):
                                 start_byte = int(parts[4])
                                 end_byte = int(parts[6])
 
-                                # Validate byte range
                                 if start_byte < 0 or start_byte >= file_size or end_byte < start_byte or end_byte >= file_size:
                                     print(f"[Thread for {filename} from {client_address}] Invalid byte range requested: {start_byte}-{end_byte}. Ignoring.")
-                                    # In a real protocol, you might send an error response here
                                     continue
 
-                                f.seek(start_byte) # Move file pointer to start_byte
+                                f.seek(start_byte)
                                 chunk_size = end_byte - start_byte + 1
-                                file_chunk = f.read(chunk_size) # Read the requested chunk
+                                file_chunk = f.read(chunk_size)
 
                                 encoded_data = base64.b64encode(file_chunk).decode('ascii')
-                                print(f"[Thread for {filename} from {client_address}] Prepared {len(file_chunk)} bytes ({len(encoded_data)} encoded) from {start_byte}-{end_byte}.")
-                                # In next step, we will send this data
                                 
+                                # --- Start of Step 14 additions ---
+                                response_to_client = f"FILE {filename} OK START {start_byte} END {end_byte} DATA {encoded_data}"
+                                print(f"[Thread for {filename} from {client_address}] Sending data chunk ({len(file_chunk)} bytes) from {start_byte}-{end_byte}.")
+                                data_socket.sendto(response_to_client.encode('ascii'), client_address)
+                                # --- End of Step 14 additions ---
+
                             except ValueError:
                                 print(f"[Thread for {filename} from {client_address}] Invalid START/END byte values in GET request: {request_message}. Ignoring.")
                         else:
@@ -72,17 +72,16 @@ def handle_file_transmission(filename, client_address):
                     elif len(parts) == 3 and parts[0] == "FILE" and parts[1] == filename and parts[2] == "CLOSE":
                         # This will be handled in a later step
                         print(f"[Thread for {filename} from {client_address}] Received CLOSE request (will handle later).")
-                        break # For now, break loop on CLOSE
+                        break
                     else:
                         print(f"[Thread for {filename} from {client_address}] Unrecognized FILE command or malformed request: {request_message}. Ignoring.")
 
                 except socket.timeout:
                     print(f"[Thread for {filename} from {client_address}] Timeout waiting for client request. Terminating thread.")
-                    break # Exit loop if client times out
+                    break
                 except Exception as e:
                     print(f"[Thread for {filename} from {client_address}] An error occurred in data transfer loop: {e}")
                     break
-        # --- End of Step 13 additions ---
 
     except FileNotFoundError:
         err_msg = f"ERR {filename} NOT_FOUND"
