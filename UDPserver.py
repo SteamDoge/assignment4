@@ -13,22 +13,31 @@ def handle_file_transmission(filename, client_address):
     data_port = 0
     data_socket = None
     max_bind_attempts = 10
+    # --- Step 19: Robust port binding attempt ---
     for attempt in range(max_bind_attempts):
         data_port = random.randint(50000, 51000)
         try:
             data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             data_socket.bind(('', data_port))
             print(f"[Thread for {filename} from {client_address}] Bound to port {data_port}")
-            break
+            break # Successfully bound
         except OSError as e:
-            print(f"[Thread for {filename} from {client_address}] Port {data_port} already in use, trying another... ({e})")
-            time.sleep(0.05)
+            print(f"[Thread for {filename} from {client_address}] Port {data_port} already in use, trying another... (Attempt {attempt+1}/{max_bind_attempts}, {e})")
+            time.sleep(0.05) # Small delay before retrying bind
     
     if not data_socket:
-        print(f"[Thread for {filename} from {client_address}] Failed to bind to a port. Aborting.")
-        return
+        print(f"[Thread for {filename} from {client_address}] Failed to bind to a port after {max_bind_attempts} attempts. Aborting file transfer for this client.")
+        # If port binding completely fails, cannot communicate, so no ERR response to client.
+        return # Terminate thread
 
     try:
+        # --- Step 19: Check file existence again within thread for robustness ---
+        if not os.path.exists(file_path):
+            err_msg = f"ERR {filename} NOT_FOUND"
+            print(f"[Thread for {filename} from {client_address}] File '{filename}' not found (unexpectedly at data transfer stage). Sending ERR.")
+            data_socket.sendto(err_msg.encode('ascii'), client_address)
+            return # Exit thread if file not found
+
         file_size = os.path.getsize(file_path)
         ok_response = f"OK {filename} SIZE {file_size} PORT {data_port}"
         print(f"[Thread for {filename} from {client_address}] Sending initial OK: {ok_response}")
@@ -36,8 +45,6 @@ def handle_file_transmission(filename, client_address):
 
         with open(file_path, 'rb') as f:
             while True:
-                # Set a reasonable timeout for receiving requests
-                # This prevents threads from hanging indefinitely if client disconnects
                 data_socket.settimeout(30) 
                 try:
                     request_data, addr = data_socket.recvfrom(4096)
@@ -46,7 +53,6 @@ def handle_file_transmission(filename, client_address):
 
                     parts = request_message.split(" ")
                     
-                    # --- Start of Step 17 additions/changes ---
                     if len(parts) >= 3 and parts[0] == "FILE" and parts[1] == filename:
                         command = parts[2]
                         
@@ -56,8 +62,11 @@ def handle_file_transmission(filename, client_address):
                                     start_byte = int(parts[4])
                                     end_byte = int(parts[6])
 
-                                    if start_byte < 0 or start_byte >= file_size or end_byte < start_byte or end_byte >= file_size:
+                                    # --- Step 19: More robust range validation ---
+                                    if start_byte < 0 or start_byte >= file_size or \
+                                       end_byte < start_byte or end_byte >= file_size:
                                         print(f"[Thread for {filename} from {client_address}] Invalid byte range requested: {start_byte}-{end_byte}. Ignoring.")
+                                        # Optionally send a specific error for bad range
                                         continue
 
                                     f.seek(start_byte)
@@ -72,36 +81,39 @@ def handle_file_transmission(filename, client_address):
 
                                 except ValueError:
                                     print(f"[Thread for {filename} from {client_address}] Invalid START/END byte values in GET request: {request_message}. Ignoring.")
+                                except Exception as e: # Catch any other errors during file read/encoding
+                                    print(f"[Thread for {filename} from {client_address}] Error processing GET request: {e}. Ignoring.")
                             else:
                                 print(f"[Thread for {filename} from {client_address}] Malformed GET request: {request_message}. Ignoring.")
                         
                         elif command == "CLOSE":
-                            if len(parts) == 3: # Check if it's just "FILE <filename> CLOSE"
+                            if len(parts) == 3:
                                 close_response = f"FILE {filename} CLOSE_OK"
                                 print(f"[Thread for {filename} from {client_address}] Received CLOSE request. Sending CLOSE_OK.")
                                 data_socket.sendto(close_response.encode('ascii'), client_address)
-                                break # Exit the while loop to terminate the thread
+                                break
                             else:
                                 print(f"[Thread for {filename} from {client_address}] Malformed CLOSE request: {request_message}. Ignoring.")
                         else:
                             print(f"[Thread for {filename} from {client_address}] Unrecognized FILE command: {command}. Ignoring.")
                     else:
                         print(f"[Thread for {filename} from {client_address}] Malformed request or incorrect filename: {request_message}. Ignoring.")
-                    # --- End of Step 17 additions/changes ---
 
                 except socket.timeout:
                     print(f"[Thread for {filename} from {client_address}] Timeout waiting for client request. Terminating thread.")
                     break
+                # --- Step 19: Catch general exceptions in the thread loop ---
                 except Exception as e:
-                    print(f"[Thread for {filename} from {client_address}] An error occurred in data transfer loop: {e}")
+                    print(f"[Thread for {filename} from {client_address}] An unexpected error occurred in data transfer loop: {e}. Terminating thread.")
                     break
+        # --- End of Step 19 additions/changes for thread loop ---
 
-    except FileNotFoundError:
-        err_msg = f"ERR {filename} NOT_FOUND"
-        print(f"[Thread for {filename} from {client_address}] File not found during transfer attempt: {filename}. Sending ERR.")
+    except IOError as e: # Catch errors when opening the file for reading (e.g., permissions)
+        err_msg = f"ERR {filename} SERVER_FILE_ERROR"
+        print(f"[Thread for {filename} from {client_address}] IO Error opening file '{filename}': {e}. Sending ERR.")
         data_socket.sendto(err_msg.encode('ascii'), client_address)
-    except Exception as e:
-        print(f"[Thread for {filename} from {client_address}] An unexpected error occurred: {e}")
+    except Exception as e: # Catch any other unexpected errors during thread initialization
+        print(f"[Thread for {filename} from {client_address}] An unexpected error occurred during thread setup: {e}")
     finally:
         if data_socket:
             data_socket.close()
@@ -133,8 +145,14 @@ def start_server(port):
                 file_path = os.path.join("files", filename) 
                 
                 if os.path.exists(file_path):
-                    print(f"File '{filename}' found. Spawning new thread for {client_address}.")
-                    threading.Thread(target=handle_file_transmission, args=(filename, client_address,)).start()
+                    # --- Step 19: More robust file existence check for main thread ---
+                    if os.path.isfile(file_path): # Ensure it's a file, not a directory
+                        print(f"File '{filename}' found. Spawning new thread for {client_address}.")
+                        threading.Thread(target=handle_file_transmission, args=(filename, client_address,)).start()
+                    else:
+                        response_message = f"ERR {filename} NOT_A_FILE"
+                        print(f"Path '{filename}' exists but is not a file. Sending ERR to {client_address}")
+                        server_socket.sendto(response_message.encode('ascii'), client_address)
                 else:
                     response_message = f"ERR {filename} NOT_FOUND"
                     print(f"File '{filename}' not found. Sending ERR to {client_address}")
@@ -143,6 +161,7 @@ def start_server(port):
             else:
                 print(f"Invalid request format: {request_message}. Ignoring.")
 
+        # --- Step 19: Catch general exceptions in main server loop ---
         except Exception as e:
             print(f"An unexpected error occurred in main server loop: {e}")
 
