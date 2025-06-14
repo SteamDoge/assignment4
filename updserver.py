@@ -1,6 +1,7 @@
 # UDPServer.py
 import socket
 import sys
+import os # Import os for file path operations
 
 def start_server(port):
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -11,21 +12,46 @@ def start_server(port):
         print(f"Error: Could not bind to port {port}. {e}")
         sys.exit(1)
 
-    # --- Start of Step 3 additions ---
+    # Ensure 'files' directory exists for storing files
+    if not os.path.exists("files"):
+        os.makedirs("files")
+        print("Created 'files' directory.")
+
     while True:
         try:
-            # 接收客户端的请求，缓冲区大小设置为 4096 字节
             request_data, client_address = server_socket.recvfrom(4096)
-            # 将接收到的字节数据解码为 ASCII 字符串，并去除首尾空白
             request_message = request_data.decode('ascii').strip()
             print(f"Received request from {client_address}: {request_message}")
 
-            # 在此步骤，我们只打印请求，不进行任何处理或响应
-            # 后续步骤会在这里添加逻辑
+            # --- Start of Step 5 additions ---
+            parts = request_message.split(" ")
+            
+            # Check for correct DOWNLOAD message format
+            if len(parts) == 2 and parts[0] == "DOWNLOAD":
+                filename = parts[1]
+                file_path = os.path.join("files", filename) # Construct full path
+                
+                response_message = ""
+                if os.path.exists(file_path):
+                    # For now, we'll use dummy values for SIZE and PORT.
+                    # Actual file size and dynamic port will be added in later steps.
+                    dummy_file_size = 0 
+                    dummy_data_port = 0
+                    response_message = f"OK {filename} SIZE {dummy_file_size} PORT {dummy_data_port}"
+                    print(f"File '{filename}' found. Sending OK to {client_address}")
+                else:
+                    response_message = f"ERR {filename} NOT_FOUND"
+                    print(f"File '{filename}' not found. Sending ERR to {client_address}")
+                
+                # Send the response back to the client
+                server_socket.sendto(response_message.encode('ascii'), client_address)
+
+            else:
+                print(f"Invalid request format: {request_message}. Ignoring.")
+            # --- End of Step 5 additions ---
 
         except Exception as e:
             print(f"An unexpected error occurred in main server loop: {e}")
-    # --- End of Step 3 additions ---
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
