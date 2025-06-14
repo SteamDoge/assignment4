@@ -3,7 +3,7 @@ import socket
 import sys
 import os
 import time
-import base64 # Import base64 module for decoding
+import base64
 
 def send_and_receive(sock, message, server_address_tuple, initial_timeout_ms=1000, max_retries=5, current_server_port=None):
     encoded_message = message.encode('ascii')
@@ -17,7 +17,7 @@ def send_and_receive(sock, message, server_address_tuple, initial_timeout_ms=100
             # print(f"[send_and_receive] Sending '{message}' to {target_address} (Timeout: {current_timeout}ms, Attempt: {i+1}/{max_retries})")
             sock.sendto(encoded_message, target_address)
             
-            response_data, sender_addr = sock.recvfrom(8192) # Max UDP packet size is usually 65507 bytes. 8192 is safe for Base64 of 1000 bytes.
+            response_data, sender_addr = sock.recvfrom(8192)
             response_message = response_data.decode('ascii').strip()
             # print(f"[send_and_receive] Received response: '{response_message}' from {sender_addr}")
             return response_message, sender_addr
@@ -84,55 +84,48 @@ def start_client(server_host, server_port, files_list_path):
                         print("Download Progress: ", end="") 
                         sys.stdout.flush()
 
-                        # --- Start of Step 15 additions ---
-                        chunk_size = 1000 # Protocol states up to 1000 bytes of binary data per message
+                        chunk_size = 1000
                         
                         while downloaded_bytes < file_size:
                             start_byte = downloaded_bytes
-                            # Calculate end_byte (inclusive)
-                            # Make sure we don't request beyond file_size - 1
                             end_byte = min(file_size - 1, start_byte + chunk_size - 1) 
                             
-                            if start_byte > end_byte and downloaded_bytes < file_size: # Should not happen if loop condition is correct
+                            if start_byte > end_byte and downloaded_bytes < file_size:
                                 print("\nWarning: Calculated empty range before full download. Breaking.")
                                 break
 
                             get_message = f"FILE {resp_filename} GET START {start_byte} END {end_byte}"
                             
-                            # Use the data_port provided by the server for GET requests
                             data_response, sender_addr = send_and_receive(
-                                client_socket, get_message, (server_host, server_port), # server_port is the initial one, but current_server_port will override
+                                client_socket, get_message, (server_host, server_port),
                                 initial_timeout_ms=1000, max_retries=5, current_server_port=data_port
                             )
 
                             if not data_response:
                                 print(f"\nFailed to get data for {resp_filename} bytes {start_byte}-{end_byte}. Aborting download.")
-                                # Mark as failed to avoid sending CLOSE for incomplete file
                                 downloaded_bytes = -1 
                                 break
 
-                            data_parts = data_response.split(" ", 7) # Split into 7 parts plus the remaining data (DATA ...)
-                            # Expected format: FILE <filename> OK START <start> END <end> DATA <encoded_data>
+                            data_parts = data_response.split(" ", 7)
                             if len(data_parts) == 8 and \
                                data_parts[0] == "FILE" and data_parts[1] == resp_filename and \
                                data_parts[2] == "OK" and data_parts[3] == "START" and data_parts[5] == "END" and \
-                               data_parts[7].startswith("DATA "): # Check if the last part starts with "DATA "
+                               data_parts[7].startswith("DATA "):
                                 try:
                                     resp_start_byte = int(data_parts[4])
                                     resp_end_byte = int(data_parts[6])
-                                    encoded_data = data_parts[7][5:].strip() # Extract Base64 string after "DATA "
+                                    encoded_data = data_parts[7][5:].strip()
                                     decoded_data = base64.b64decode(encoded_data)
 
                                     if resp_start_byte != start_byte or resp_end_byte != end_byte:
                                         print(f"\nWarning: Received data for unexpected range {resp_start_byte}-{resp_end_byte}, expected {start_byte}-{end_byte}. Attempting to write anyway.")
                                     
-                                    # Write data to the correct position in the file
                                     f.seek(resp_start_byte)
                                     f.write(decoded_data)
-                                    downloaded_bytes += len(decoded_data) # Update total downloaded bytes
+                                    downloaded_bytes += len(decoded_data)
 
-                                    print("*", end="") # Print progress indicator
-                                    sys.stdout.flush() # Ensure it's immediately visible
+                                    print("*", end="")
+                                    sys.stdout.flush()
 
                                 except (ValueError, IndexError, base64.binascii.Error) as e:
                                     print(f"\nError decoding or processing data for {resp_filename}: {e}. Aborting download.")
@@ -143,8 +136,26 @@ def start_client(server_host, server_port, files_list_path):
                                 downloaded_bytes = -1
                                 break
                         
-                        print("\nFile data transfer loop finished.") # Newline after progress stars
-                        # --- End of Step 15 additions ---
+                        print("\nFile data transfer loop finished.")
+
+                        # --- Start of Step 16 additions ---
+                        # If download was successful (all bytes received)
+                        if downloaded_bytes == file_size:
+                            close_message = f"FILE {resp_filename} CLOSE"
+                            # Send CLOSE request using the data_port
+                            close_response, sender_addr = send_and_receive(
+                                client_socket, close_message, (server_host, server_port),
+                                initial_timeout_ms=1000, max_retries=5, current_server_port=data_port
+                            )
+
+                            if close_response and close_response.strip() == f"FILE {resp_filename} CLOSE_OK":
+                                print(f"Successfully downloaded '{resp_filename}'. Received CLOSE_OK.")
+                            else:
+                                print(f"Warning: Failed to get CLOSE_OK for '{resp_filename}'. (Response: {close_response})")
+                                print("File might be fully downloaded but protocol not cleanly ended (as per spec).")
+                        else:
+                            print(f"Download of '{resp_filename}' incomplete or failed. Expected {file_size} bytes, got {downloaded_bytes} bytes.")
+                        # --- End of Step 16 additions ---
 
                 except IOError as e:
                     print(f"Error: Could not open/write to local file '{local_file_path}'. {e}")
