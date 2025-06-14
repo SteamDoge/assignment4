@@ -189,7 +189,7 @@ def start_client(server_host, server_port, files_list_path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print("Usage: python3 UDPClient.py <hostname> <port_number> <files_list.txt>")
+        print("Usage: python3 UDPclient.py <hostname> <port_number> <files_list.txt>")
         sys.exit(1)
     server_hostname = sys.argv[1]
     try:

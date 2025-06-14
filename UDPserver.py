@@ -167,7 +167,7 @@ def start_server(port):
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python3 UDPServer.py <port_number>")
+        print("Usage: python3 UDPserver.py <port_number>")
         sys.exit(1)
     try:
         server_port = int(sys.argv[1])

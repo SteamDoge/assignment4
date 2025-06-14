@@ -1,0 +1,3 @@
+small.txt
+medium.txt
+kami.jpg
