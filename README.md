@@ -4,8 +4,12 @@
 ├── UDPServer.py
 ├── UDPClient.py
 ├── files/
-│   ├── small_text.txt
-│   ├── medium_text.txt
-│   └── image.jpg  # Or large_file.bin
+│   ├── small.txt
+│   ├── medium.txt
+│   └── kami.png
 └── files.txt
 └── README.md
+
+python UDPServer.py 12345
+
+python UDPClient.py localhost 12345 files.txt

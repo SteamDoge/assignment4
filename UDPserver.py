@@ -1,180 +1,182 @@
-# UDPServer.py
 import socket
-import sys
-import os
 import threading
-import random
-import time
+import os
 import base64
+import math
+import time
+import sys
 
-def handle_file_transmission(filename, client_address):
-    file_path = os.path.join("files", filename)
+# --- Configuration ---
+SERVER_HOST = '0.0.0.0' # Listen on all available interfaces
+CHUNK_SIZE = 1000       # Bytes of raw data per chunk
+MAX_RETRIES = 5         # Max retransmission attempts for client
+INITIAL_TIMEOUT = 1     # Initial timeout for client's stop-and-wait
+FILES_DIR = 'files'     # Directory where files are stored on server
+CLIENT_FILES_DIR = 'client_files' # Not used by server, but good to define if needed later
 
-    data_port = 0
-    data_socket = None
-    max_bind_attempts = 10
-    # --- Step 19: Robust port binding attempt ---
-    for attempt in range(max_bind_attempts):
-        data_port = random.randint(50000, 51000)
-        try:
-            data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            data_socket.bind(('', data_port))
-            print(f"[Thread for {filename} from {client_address}] Bound to port {data_port}")
-            break # Successfully bound
-        except OSError as e:
-            print(f"[Thread for {filename} from {client_address}] Port {data_port} already in use, trying another... (Attempt {attempt+1}/{max_bind_attempts}, {e})")
-            time.sleep(0.05) # Small delay before retrying bind
-    
-    if not data_socket:
-        print(f"[Thread for {filename} from {client_address}] Failed to bind to a port after {max_bind_attempts} attempts. Aborting file transfer for this client.")
-        # If port binding completely fails, cannot communicate, so no ERR response to client.
-        return # Terminate thread
+# --- Helper Function to ensure directory exists ---
+def ensure_dir(directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        print(f"Created directory: {directory}")
+
+# --- File Transfer Handler for a single client/file ---
+def handle_file_transfer(data_socket, client_address, filename, file_size):
+    """
+    Handles the reliable transfer of a single file to a specific client.
+    This runs in a new thread for each file download.
+    """
+    print(f"[Thread {threading.get_ident()}] Handling transfer of '{filename}' to {client_address} via port {data_socket.getsockname()[1]}")
+
+    file_path = os.path.join(FILES_DIR, filename)
+    current_offset = 0 # Keep track of the current byte offset in the file
 
     try:
-        # --- Step 19: Check file existence again within thread for robustness ---
-        if not os.path.exists(file_path):
-            err_msg = f"ERR {filename} NOT_FOUND"
-            print(f"[Thread for {filename} from {client_address}] File '{filename}' not found (unexpectedly at data transfer stage). Sending ERR.")
-            data_socket.sendto(err_msg.encode('ascii'), client_address)
-            return # Exit thread if file not found
-
-        file_size = os.path.getsize(file_path)
-        ok_response = f"OK {filename} SIZE {file_size} PORT {data_port}"
-        print(f"[Thread for {filename} from {client_address}] Sending initial OK: {ok_response}")
-        data_socket.sendto(ok_response.encode('ascii'), client_address)
-
         with open(file_path, 'rb') as f:
-            while True:
-                data_socket.settimeout(30) 
+            while current_offset < file_size:
+                # 1. Receive client's request for the next chunk
                 try:
-                    request_data, addr = data_socket.recvfrom(4096)
-                    request_message = request_data.decode('ascii').strip()
-                    # print(f"[Thread for {filename} from {client_address}] Received request: {request_message}")
+                    # Expecting "REQ <filename> START <start_byte> END <end_byte>"
+                    request_data, _ = data_socket.recvfrom(2048) # Sufficient buffer for request
+                    request_msg = request_data.decode('utf-8').strip()
+                    parts = request_msg.split()
 
-                    parts = request_message.split(" ")
-                    
-                    if len(parts) >= 3 and parts[0] == "FILE" and parts[1] == filename:
-                        command = parts[2]
+                    if len(parts) == 6 and parts[0] == "REQ" and parts[1] == filename and parts[2] == "START" and parts[4] == "END":
+                        req_start_byte = int(parts[3])
+                        req_end_byte = int(parts[5])
                         
-                        if command == "GET":
-                            if len(parts) == 7 and parts[3] == "START" and parts[5] == "END":
-                                try:
-                                    start_byte = int(parts[4])
-                                    end_byte = int(parts[6])
+                        # Basic validation: requested chunk must match what we expect to send next
+                        if req_start_byte != current_offset:
+                            print(f"[Thread {threading.get_ident()}] Warning: Client requested offset {req_start_byte}, but expected {current_offset}. Retransmitting previous chunk if needed.")
+                            # For simple stop-and-wait, we might just re-send the expected chunk.
+                            # In a more complex ARQ, we'd need sequence numbers to handle out-of-order/duplicates.
+                            # For now, we'll try to serve the requested chunk.
 
-                                    # --- Step 19: More robust range validation ---
-                                    if start_byte < 0 or start_byte >= file_size or \
-                                       end_byte < start_byte or end_byte >= file_size:
-                                        print(f"[Thread for {filename} from {client_address}] Invalid byte range requested: {start_byte}-{end_byte}. Ignoring.")
-                                        # Optionally send a specific error for bad range
-                                        continue
-
-                                    f.seek(start_byte)
-                                    chunk_size = end_byte - start_byte + 1
-                                    file_chunk = f.read(chunk_size)
-
-                                    encoded_data = base64.b64encode(file_chunk).decode('ascii')
-                                    
-                                    response_to_client = f"FILE {filename} OK START {start_byte} END {end_byte} DATA {encoded_data}"
-                                    print(f"[Thread for {filename} from {client_address}] Sending data chunk ({len(file_chunk)} bytes) from {start_byte}-{end_byte}.")
-                                    data_socket.sendto(response_to_client.encode('ascii'), client_address)
-
-                                except ValueError:
-                                    print(f"[Thread for {filename} from {client_address}] Invalid START/END byte values in GET request: {request_message}. Ignoring.")
-                                except Exception as e: # Catch any other errors during file read/encoding
-                                    print(f"[Thread for {filename} from {client_address}] Error processing GET request: {e}. Ignoring.")
-                            else:
-                                print(f"[Thread for {filename} from {client_address}] Malformed GET request: {request_message}. Ignoring.")
+                        # Read the chunk from the file
+                        f.seek(req_start_byte)
+                        chunk = f.read(req_end_byte - req_start_byte + 1)
                         
-                        elif command == "CLOSE":
-                            if len(parts) == 3:
-                                close_response = f"FILE {filename} CLOSE_OK"
-                                print(f"[Thread for {filename} from {client_address}] Received CLOSE request. Sending CLOSE_OK.")
-                                data_socket.sendto(close_response.encode('ascii'), client_address)
-                                break
-                            else:
-                                print(f"[Thread for {filename} from {client_address}] Malformed CLOSE request: {request_message}. Ignoring.")
-                        else:
-                            print(f"[Thread for {filename} from {client_address}] Unrecognized FILE command: {command}. Ignoring.")
+                        # Base64 encode the chunk
+                        encoded_chunk = base64.b64encode(chunk).decode('utf-8')
+                        
+                        # Construct the response packet
+                        response_msg = f"DATA {filename} START {req_start_byte} END {req_end_byte} {encoded_chunk}"
+                        
+                        data_socket.sendto(response_msg.encode('utf-8'), client_address)
+                        print(f"[Thread {threading.get_ident()}] Sent chunk {req_start_byte}-{req_end_byte} for '{filename}'.")
+                        
+                        # Only advance offset if we sent the expected chunk
+                        if req_start_byte == current_offset:
+                           current_offset += len(chunk)
                     else:
-                        print(f"[Thread for {filename} from {client_address}] Malformed request or incorrect filename: {request_message}. Ignoring.")
-
+                        print(f"[Thread {threading.get_ident()}] Received invalid request: {request_msg}")
+                        # Optionally send an error back, or just ignore
+                        
                 except socket.timeout:
-                    print(f"[Thread for {filename} from {client_address}] Timeout waiting for client request. Terminating thread.")
+                    print(f"[Thread {threading.get_ident()}] Socket timeout waiting for client's REQ. Client might have disconnected or timed out.")
+                    break # Exit loop if client stops responding
+                except ValueError as e:
+                    print(f"[Thread {threading.get_ident()}] Error parsing client request: {e}. Request was: {request_msg}")
                     break
-                # --- Step 19: Catch general exceptions in the thread loop ---
                 except Exception as e:
-                    print(f"[Thread for {filename} from {client_address}] An unexpected error occurred in data transfer loop: {e}. Terminating thread.")
+                    print(f"[Thread {threading.get_ident()}] An unexpected error occurred during chunk transfer: {e}")
                     break
-        # --- End of Step 19 additions/changes for thread loop ---
 
-    except IOError as e: # Catch errors when opening the file for reading (e.g., permissions)
-        err_msg = f"ERR {filename} SERVER_FILE_ERROR"
-        print(f"[Thread for {filename} from {client_address}] IO Error opening file '{filename}': {e}. Sending ERR.")
-        data_socket.sendto(err_msg.encode('ascii'), client_address)
-    except Exception as e: # Catch any other unexpected errors during thread initialization
-        print(f"[Thread for {filename} from {client_address}] An unexpected error occurred during thread setup: {e}")
+            # After sending all chunks, send FILE CLOSE confirmation
+            if current_offset >= file_size:
+                close_msg = f"FILE {filename} CLOSE_OK"
+                data_socket.sendto(close_msg.encode('utf-8'), client_address)
+                print(f"[Thread {threading.get_ident()}] Finished sending all chunks for '{filename}'. Sent CLOSE_OK.")
+            else:
+                print(f"[Thread {threading.get_ident()}] Transfer of '{filename}' did not complete. Sent {current_offset}/{file_size} bytes.")
+
+    except FileNotFoundError:
+        error_msg = f"ERR {filename} NOT_FOUND"
+        data_socket.sendto(error_msg.encode('utf-8'), client_address)
+        print(f"[Thread {threading.get_ident()}] Error: File '{filename}' not found for transfer.")
+    except Exception as e:
+        print(f"[Thread {threading.get_ident()}] An error occurred while opening or reading file '{filename}': {e}")
     finally:
-        if data_socket:
-            data_socket.close()
-            print(f"[Thread for {filename} from {client_address}] Data socket closed.")
+        data_socket.close()
+        print(f"[Thread {threading.get_ident()}] Data socket for '{filename}' closed.")
 
-def start_server(port):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# --- Main Server Logic ---
+def run_server(server_port):
+    ensure_dir(FILES_DIR) # Ensure the files directory exists
+
+    main_server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        server_socket.bind(('', port))
-        print(f"UDP Server listening on port {port}")
-    except OSError as e:
-        print(f"Error: Could not bind to port {port}. {e}")
-        sys.exit(1)
-
-    if not os.path.exists("files"):
-        os.makedirs("files")
-        print("Created 'files' directory.")
+        main_server_socket.bind((SERVER_HOST, server_port))
+        print(f"UDP Server listening on {SERVER_HOST}:{server_port}")
+    except socket.error as e:
+        print(f"Error: Could not bind to port {server_port}. Reason: {e}")
+        print("Please check if the port is already in use or if you have sufficient permissions.")
+        sys.exit(1) # Exit if cannot bind
 
     while True:
         try:
-            request_data, client_address = server_socket.recvfrom(4096)
-            request_message = request_data.decode('ascii').strip()
-            print(f"Received DOWNLOAD request from {client_address}: {request_message}")
+            # Main socket listens for initial DOWNLOAD requests
+            data, client_address = main_server_socket.recvfrom(1024) # Small buffer for initial request
+            message = data.decode('utf-8').strip()
+            print(f"Received message from {client_address}: {message}")
 
-            parts = request_message.split(" ")
-            
+            parts = message.split()
             if len(parts) == 2 and parts[0] == "DOWNLOAD":
                 filename = parts[1]
-                file_path = os.path.join("files", filename) 
-                
-                if os.path.exists(file_path):
-                    # --- Step 19: More robust file existence check for main thread ---
-                    if os.path.isfile(file_path): # Ensure it's a file, not a directory
-                        print(f"File '{filename}' found. Spawning new thread for {client_address}.")
-                        threading.Thread(target=handle_file_transmission, args=(filename, client_address,)).start()
-                    else:
-                        response_message = f"ERR {filename} NOT_A_FILE"
-                        print(f"Path '{filename}' exists but is not a file. Sending ERR to {client_address}")
-                        server_socket.sendto(response_message.encode('ascii'), client_address)
+                file_path = os.path.join(FILES_DIR, filename)
+
+                if os.path.exists(file_path) and os.path.isfile(file_path):
+                    file_size = os.path.getsize(file_path)
+                    
+                    # Create a new UDP socket for this specific file transfer
+                    data_transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    # Bind to an ephemeral (random available) port
+                    data_transfer_socket.bind((SERVER_HOST, 0)) 
+                    data_port = data_transfer_socket.getsockname()[1] # Get the assigned port number
+
+                    # Send OK response to client
+                    ok_response = f"OK {filename} SIZE {file_size} PORT {data_port}"
+                    main_server_socket.sendto(ok_response.encode('utf-8'), client_address)
+                    print(f"Sent OK for '{filename}' (Size: {file_size}, Data Port: {data_port}) to {client_address}")
+
+                    # Start a new thread to handle the file transfer
+                    # Pass the *new* data_transfer_socket to the thread
+                    thread = threading.Thread(target=handle_file_transfer, 
+                                              args=(data_transfer_socket, client_address, filename, file_size))
+                    thread.daemon = True # Allow main program to exit even if threads are running
+                    thread.start()
+                    print(f"Started new thread (ID: {thread.ident}) for '{filename}'.")
+
                 else:
-                    response_message = f"ERR {filename} NOT_FOUND"
-                    print(f"File '{filename}' not found. Sending ERR to {client_address}")
-                    server_socket.sendto(response_message.encode('ascii'), client_address)
-
+                    error_response = f"ERR {filename} NOT_FOUND"
+                    main_server_socket.sendto(error_response.encode('utf-8'), client_address)
+                    print(f"Sent ERR NOT_FOUND for '{filename}' to {client_address}")
             else:
-                print(f"Invalid request format: {request_message}. Ignoring.")
+                print(f"Received unknown command: {message} from {client_address}")
 
-        # --- Step 19: Catch general exceptions in main server loop ---
+        except KeyboardInterrupt:
+            print("\nServer shutting down...")
+            break
         except Exception as e:
             print(f"An unexpected error occurred in main server loop: {e}")
+            # Continue listening or decide to break based on error severity
 
+    main_server_socket.close()
+    print("Main server socket closed. Server gracefully stopped.")
+
+# --- Entry Point ---
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python3 UDPserver.py <port_number>")
+        print("Usage: python3 UDPServer.py <port_number>")
         sys.exit(1)
+    
     try:
-        server_port = int(sys.argv[1])
-        if not (1024 <= server_port <= 65535):
+        port = int(sys.argv[1])
+        if not (1024 <= port <= 65535): # Standard port range
             raise ValueError("Port number must be between 1024 and 65535.")
     except ValueError as e:
-        print(f"Invalid port number: {e}")
+        print(f"Error: Invalid port number. {e}")
         sys.exit(1)
-    start_server(server_port)
+
+    run_server(port)
 
